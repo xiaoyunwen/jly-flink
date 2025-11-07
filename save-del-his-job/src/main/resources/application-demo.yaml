@@ -1,0 +1,15 @@
+dbAlias: "cbs"
+tables:
+  - "t_xxx"
+  - "t_yyy"
+
+# 数据源配置
+sources:
+  - instanceName: "cbs-zzx" #源端实例名
+    serverId: "10000-19999" #serverId，见ServerId.md
+    host: "rm-wz9dghelh0u4214ao.mysql.rds.aliyuncs.com"
+    port: 3306
+    username: "user_test"
+    password: "pwd123456"
+    fbNo: "ZZX"
+    dbName: "zzx_cbs"

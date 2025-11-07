@@ -1,0 +1,13 @@
+dbAlias: "nls"
+tables:
+  - "t_name_list"
+
+sources:
+  - instanceName: "rds-nls-risk-all"
+    serverId: "80401001-80401999"
+    host: "rm-wz9eng2ombrkh4695.mysql.rds.aliyuncs.com"
+    port: 3306
+    username: "dm_binlog"
+    password: "8trPD^TiefnAxk6h"
+    fbNo: "JLY"
+    dbName: "nls"

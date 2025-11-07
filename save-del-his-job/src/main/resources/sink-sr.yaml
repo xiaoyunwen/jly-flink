@@ -1,0 +1,8 @@
+# 目标端StarRocks配置
+host: "fe-c-a20bc2541f462cbf-internal.starrocks.aliyuncs.com"
+port: 8030 # 8030【http端口】，9030【查询端口】
+username: "flink_insert"
+password: "PCQGu1WI%iaX-vbAd3m8jl"
+dbName: "del_history"
+batchSize: 100
+flushIntervalMs: 5000
