@@ -58,7 +58,7 @@ public class StartJob {
 
             // 配置Debezium属性，处理Decimal类型（防止decimal类型被转为Base64编码）
             Properties debeziumProps = new Properties();
-            debeziumProps.setProperty("decimal.handling.mode", "precise");
+            debeziumProps.setProperty("decimal.handling.mode", "string");
 
             MySqlSource<String> mySqlSource = MySqlSource.<String>builder()
                     .hostname(source.getHost())
