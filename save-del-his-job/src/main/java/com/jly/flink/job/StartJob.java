@@ -1,5 +1,7 @@
 package com.jly.flink.job;
 
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONObject;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jly.flink.config.ConfigLoader;
@@ -24,6 +26,7 @@ import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Properties;
 
 /**
  * @author xiaoyw
@@ -53,6 +56,10 @@ public class StartJob {
                     .map(tb -> source.getDbName() + "." + tb)
                     .toArray(String[]::new);
 
+            // 配置Debezium属性，处理Decimal类型（防止decimal类型被转为Base64编码）
+            Properties debeziumProps = new Properties();
+            debeziumProps.setProperty("decimal.handling.mode", "precise");
+
             MySqlSource<String> mySqlSource = MySqlSource.<String>builder()
                     .hostname(source.getHost())
                     .port(source.getPort())
@@ -62,6 +69,7 @@ public class StartJob {
                     .password(source.getPassword())
                     .serverId(source.getServerId())
                     .startupOptions(StartupOptions.latest())
+                    .debeziumProperties(debeziumProps)
                     .deserializer(new JsonDebeziumDeserializationSchema())
                     .build();
 
@@ -107,45 +115,44 @@ public class StartJob {
      */
     public static class ParseDeleteWithSource implements MapFunction<String, Tuple5<String, String, String, String, Timestamp>> {
         private final String instanceName;
-        private final ObjectMapper objectMapper = new ObjectMapper();
 
         public ParseDeleteWithSource(String instanceName) {
             this.instanceName = instanceName;
         }
 
         @Override
-        public Tuple5<String, String, String, String, Timestamp> map(String value) throws Exception {
-            JsonNode root = objectMapper.readTree(value);
-            if (!ChangeType.DELETE.getType().equals(root.path("op").asText())) {
+        public Tuple5<String, String, String, String, Timestamp> map(String value) {
+            JSONObject root = JSONObject.parseObject(value);
+            if (!ChangeType.DELETE.getType().equals(root.getString("op"))) {
                 return null;
             }
 
-            JsonNode sourceNode = root.path("source");
-            String tableName = sourceNode.path("table").asText();
+            JSONObject sourceNode = root.getJSONObject("source");
+            String tableName = sourceNode.getString("table");
             if (StringUtils.isBlank(tableName)) {
                 log.error("table name is empty, table: {}", tableName);
                 return null;
             }
 
-            JsonNode beforeNode = root.path("before");
-            if (beforeNode.isMissingNode() || beforeNode.isNull()) {
+            JSONObject beforeNode = root.getJSONObject("before");
+            if (Objects.isNull(beforeNode)) {
                 log.error("record before is null, table: {}", tableName);
                 return null;
             }
 
-            String id = beforeNode.path("id").asText(null);
+            Object id = beforeNode.get("id");
             if (Objects.isNull(id)) {
                 log.error("record id is null, table: {}", tableName);
                 return null;
             }
 
             String dataJson = beforeNode.toString();
-            long tsMs = root.path("ts_ms").asLong(0L);
+            long tsMs = root.getLongValue("ts_ms", 0L);
             if (tsMs <= 0) {
                 log.error("ts_ms is null, table = {}", tableName);
                 return null;
             }
-            return new Tuple5<>(instanceName, tableName, id, dataJson, new Timestamp(tsMs));
+            return new Tuple5<>(instanceName, tableName, id.toString(), dataJson, new Timestamp(tsMs));
         }
     }
 }
