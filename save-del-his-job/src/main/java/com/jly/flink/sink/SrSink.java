@@ -55,7 +55,7 @@ public class SrSink extends RichSinkFunction<Tuple5<String, String, String, Stri
         this.buffer = Lists.newArrayListWithCapacity(sinkConfig.getBatchSize());
 
         this.scheduler = new ScheduledThreadPoolExecutor(1, r -> {
-            Thread t = new Thread(r, "data-flush-thread");
+            Thread t = new Thread(r, "sr-data-flush-thread");
             t.setDaemon(true);
             return t;
         });
