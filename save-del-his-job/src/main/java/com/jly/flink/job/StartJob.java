@@ -1,13 +1,12 @@
 package com.jly.flink.job;
 
-import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.jly.flink.config.ConfigLoader;
 import com.jly.flink.config.SinkConfig;
 import com.jly.flink.config.TaskConfig;
+import com.jly.flink.config.TaskConfigChecker;
 import com.jly.flink.enums.ChangeType;
+import com.jly.flink.model.TargetDataRow;
 import com.jly.flink.sink.AdbSink;
 import com.jly.flink.sink.SrSink;
 import com.ververica.cdc.connectors.mysql.source.MySqlSource;
@@ -17,7 +16,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.MapFunction;
-import org.apache.flink.api.java.tuple.Tuple5;
 import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -46,8 +44,10 @@ public class StartJob {
         String configFile = String.format("application%s.yaml", dbListened);
         log.info("configFile = {}", configFile);
         TaskConfig config = ConfigLoader.load(configFile, TaskConfig.class);
+        TaskConfigChecker.check(config);
+
         List<TaskConfig.SourceInfo> sources = config.getSources();
-        List<DataStream<Tuple5<String, String, String, String, Timestamp>>> streams = new ArrayList<>();
+        List<DataStream<TargetDataRow>> streams = new ArrayList<>();
 
         for (TaskConfig.SourceInfo source : sources) {
             log.info("sourceInfo.instanceName = {}", source.getInstanceName());
@@ -79,31 +79,28 @@ public class StartJob {
                     "SRC-" + source.getInstanceName()
             );
 
-            DataStream<Tuple5<String, String, String, String, Timestamp>> parsed =
+            DataStream<TargetDataRow> parsed =
                     rawStream.map(new ParseDeleteWithSource(source.getInstanceName()))
                             .filter(Objects::nonNull);
             streams.add(parsed);
         }
 
         // 合并所有流
-        DataStream<Tuple5<String, String, String, String, Timestamp>> unionStream = streams.get(0);
+        DataStream<TargetDataRow> unionStream = streams.get(0);
         for (int i = 1; i < streams.size(); i++) {
             unionStream = unionStream.union(streams.get(i));
         }
 
         // 添加ADB Sink
         SinkConfig adbSinkConf = ConfigLoader.load("sink-adb.yaml", SinkConfig.class);
-        unionStream.addSink(new AdbSink(config, adbSinkConf))
-                .name("adb-sink")
-                .setParallelism(1);
+        unionStream.addSink(new AdbSink(config, adbSinkConf)).name("adb-sink").setParallelism(1);
 
         // 添加SR Sink
         boolean sinkToSr = params.getBoolean("sink_to_sr", false);
         if(sinkToSr) {
-            // TODO 修改SR Sink类
             log.info("Add SR sink...");
-            //SinkConfig srSinkConf = ConfigLoader.load("sink-sr.yaml", SinkConfig.class);
-            //unionStream.addSink(new SrSink(config, srSinkConf)).name("sr-sink").setParallelism(1);
+            SinkConfig srSinkConf = ConfigLoader.load("sink-sr.yaml", SinkConfig.class);
+            unionStream.addSink(new SrSink(config, srSinkConf)).name("sr-sink").setParallelism(1);
         }
 
         log.info("start job...");
@@ -113,7 +110,7 @@ public class StartJob {
     /**
      * 解析器
      */
-    public static class ParseDeleteWithSource implements MapFunction<String, Tuple5<String, String, String, String, Timestamp>> {
+    public static class ParseDeleteWithSource implements MapFunction<String, TargetDataRow> {
         private final String instanceName;
 
         public ParseDeleteWithSource(String instanceName) {
@@ -121,7 +118,7 @@ public class StartJob {
         }
 
         @Override
-        public Tuple5<String, String, String, String, Timestamp> map(String value) {
+        public TargetDataRow map(String value) {
             JSONObject root = JSONObject.parseObject(value);
             if (!ChangeType.DELETE.getType().equals(root.getString("op"))) {
                 return null;
@@ -152,7 +149,18 @@ public class StartJob {
                 log.error("ts_ms is null, table = {}", tableName);
                 return null;
             }
-            return new Tuple5<>(instanceName, tableName, id.toString(), dataJson, new Timestamp(tsMs));
+
+            TargetDataRow row = new TargetDataRow();
+            row.setInstanceName(instanceName);
+            row.setTableName(tableName);
+
+            TargetDataRow.DataRow dataRow = new TargetDataRow.DataRow();
+            row.setDataRow(dataRow);
+
+            dataRow.setId(id.toString());
+            dataRow.setRecordDelTime(new Timestamp(tsMs));
+            dataRow.setDataJson(dataJson);
+            return row;
         }
     }
 }

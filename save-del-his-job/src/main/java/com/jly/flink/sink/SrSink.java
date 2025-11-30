@@ -1,28 +1,29 @@
 package com.jly.flink.sink;
 
-import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.jly.flink.config.SinkConfig;
 import com.jly.flink.config.TaskConfig;
-import com.jly.flink.model.DelHistory;
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
+import com.jly.flink.model.TargetDataRow;
+import com.jly.flink.utils.SrStreamLoadClient;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.lang3.StringUtils;
-import org.apache.flink.api.java.tuple.Tuple5;
+import org.apache.commons.collections.CollectionUtils;
+import org.apache.flink.api.common.state.ListState;
+import org.apache.flink.api.common.state.ListStateDescriptor;
+import org.apache.flink.api.common.typeinfo.TypeHint;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.runtime.state.FunctionInitializationContext;
+import org.apache.flink.runtime.state.FunctionSnapshotContext;
+import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
 import org.apache.flink.streaming.api.functions.sink.RichSinkFunction;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.Timestamp;
+import java.io.Serializable;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * @author xiaoyw
@@ -30,14 +31,19 @@ import java.util.stream.Collectors;
  * @description SR Sink
  */
 @Slf4j
-public class SrSink extends RichSinkFunction<Tuple5<String, String, String, String, Timestamp>> {
-    private transient volatile boolean closed = false;
+public class SrSink extends RichSinkFunction<TargetDataRow> implements CheckpointedFunction {
     private final TaskConfig taskConfig;
     private final Map<String, TaskConfig.SourceInfo> SOURCE_MAP;
     private final SinkConfig sinkConfig;
-    private transient List<DelHistory> buffer;
+    private transient volatile boolean closed = false;
     private transient ScheduledExecutorService scheduler;
-    private transient HikariDataSource dataSource;
+
+    // 状态：缓存待写入的数据（按表名分组）
+    private transient ConcurrentMap<String, List<TargetDataRow>> buffer;
+    private transient ListState<BufferItem> checkpointedState;
+    private transient SrStreamLoadClient srStreamLoadClient;
+    // 当前 checkpoint ID（用于生成幂等 label）
+    private AtomicLong currentCheckpointId = new AtomicLong(0L);
 
     public SrSink(TaskConfig taskConfig, SinkConfig sinkConfig) {
         this.taskConfig = taskConfig;
@@ -51,96 +57,136 @@ public class SrSink extends RichSinkFunction<Tuple5<String, String, String, Stri
 
     @Override
     public void open(Configuration parameters) {
-        this.dataSource = new HikariDataSource(getDataSourceConfig());
-        this.buffer = Lists.newArrayListWithCapacity(sinkConfig.getBatchSize());
+        srStreamLoadClient = new SrStreamLoadClient(sinkConfig);
+        buffer = Maps.newConcurrentMap();
 
         this.scheduler = new ScheduledThreadPoolExecutor(1, r -> {
             Thread t = new Thread(r, "sr-data-flush-thread");
             t.setDaemon(true);
             return t;
         });
-        this.scheduler.scheduleAtFixedRate(this::flush, sinkConfig.getFlushIntervalMs(), sinkConfig.getFlushIntervalMs(), TimeUnit.MILLISECONDS);
-    }
 
-    private HikariConfig getDataSourceConfig() {
-        String httpUrl = String.format("http://%s:%d", sinkConfig.getHost(), sinkConfig.getPort());
-
-        HikariConfig config = new HikariConfig();
-        config.setJdbcUrl(httpUrl);
-        config.setUsername(sinkConfig.getUsername());
-        config.setPassword(sinkConfig.getPassword());
-        config.setMaximumPoolSize(10);
-        config.setMinimumIdle(2);
-        config.setConnectionTimeout(30_000);
-        config.addDataSourceProperty("cachePrepStmts", "true");
-        config.addDataSourceProperty("prepStmtCacheSize", "250");
-        config.addDataSourceProperty("prepStmtCacheSqlLimit", "2048");
-        config.addDataSourceProperty("useServerPrepStmts", "true");
-        config.addDataSourceProperty("rewriteBatchedStatements", "true");
-        return config;
+        this.scheduler.scheduleAtFixedRate(() -> {
+            try {
+                flushAll();
+            } catch (Exception e) {
+                log.error("Flushing data to SR failed", e);
+            }
+        }, sinkConfig.getFlushIntervalMs(), sinkConfig.getFlushIntervalMs(), TimeUnit.MILLISECONDS);
     }
 
     @Override
-    public void invoke(Tuple5<String, String, String, String, Timestamp> value, Context context) {
+    public void invoke(TargetDataRow value, Context context) throws Exception {
         if (closed) {
             return;
         }
 
-        synchronized (taskConfig) {
-            // Tuple5<>(instanceName, tableName, id, dataJson, delTime)
-            TaskConfig.SourceInfo sourceInfo = SOURCE_MAP.get(value.f0);
-            String dbTbName = String.format("%s_%s", taskConfig.getDbAlias(), value.f1);
-            buffer.add(new DelHistory(dbTbName, value.f2, sourceInfo.getFbNo(), value.f3, value.f4));
-            if (buffer.size() >= sinkConfig.getBatchSize()) {
-                flush();
+        synchronized (SrSink.class) {
+            TaskConfig.SourceInfo sourceInfo = SOURCE_MAP.get(value.getInstanceName());
+            value.setDbTbName(String.format("%s_%s", taskConfig.getDbAlias(), value.getTableName()));
+            value.getDataRow().setFbNo(sourceInfo.getFbNo());
+
+            buffer.computeIfAbsent(value.getDbTbName(), k -> new ArrayList<>()).add(value);
+
+            // 触发批量写入
+            if (buffer.get(value.getDbTbName()).size() >= sinkConfig.getBatchSize()) {
+                flushTable(value.getDbTbName());
             }
         }
     }
 
-    private void flush() {
-        synchronized (taskConfig) {
-            if (buffer.isEmpty()) {
-                return;
-            }
+    private void flushTable(String dbTbName) throws Exception {
+        List<TargetDataRow> rows = buffer.remove(dbTbName);
+        if (CollectionUtils.isEmpty(rows)) {
+            return;
+        }
 
-            try (Connection conn = dataSource.getConnection()) {
-                conn.setAutoCommit(false);
-                var grouped = buffer.stream().collect(Collectors.groupingBy(DelHistory::getDbTbName));
+        // 使用 checkpointId 生成幂等 label
+        String label = String.format("sink_sr_%s_%d_%d",
+                getRuntimeContext().getJobInfo().getJobId().toString().replace("-", ""),
+                getRuntimeContext().getTaskInfo().getIndexOfThisSubtask(),
+                currentCheckpointId.getAndIncrement());
 
-                for (var entry : grouped.entrySet()) {
-                    String table = entry.getKey();
-                    List<DelHistory> records = entry.getValue();
-                    String sql = String.format("INSERT INTO `%s` (id, fb_no, record_del_time, data_json) VALUES (?, ?, ?, ?)", table);
+        String resp;
+        try {
+            resp = srStreamLoadClient.streamLoad(dbTbName, label, rows);
+        } catch (Exception e) {
+            log.error("Flushing to SR table {} failed, rows={}, label={}", dbTbName , rows.size(), label);
+            throw e;
+        }
 
-                    try (PreparedStatement stmt = conn.prepareStatement(sql)) {
-                        for (DelHistory r : records) {
-                            stmt.setString(1, r.getId());
-                            stmt.setString(2, r.getFbNo());
-                            stmt.setTimestamp(3, r.getDelTime());
-                            stmt.setString(4, r.getDataJson());
-                            stmt.addBatch();
-                        }
-                        stmt.executeBatch();
-                    }
-                }
-                conn.commit();
-                buffer.clear();
-            } catch (Exception e) {
-                log.error("Flush failed: {}", e.getMessage(), e);
+        if(!resp.contains("\"Status\": \"Success\"")) {
+            throw new RuntimeException(String.format("Flushing to SR table %s failed, rows=%d, label=%s, resp: %s", dbTbName, rows.size(), label, resp));
+        }
+        log.info("Flushing to SR table {} success, rows={}, label={}", dbTbName, rows.size(), label);
+    }
+
+    private void flushAll() throws Exception {
+        synchronized (SrSink.class) {
+            for (String dbTbName : buffer.keySet()) {
+                flushTable(dbTbName);
             }
         }
     }
 
     @Override
-    public void close() {
+    public void close() throws Exception {
         closed = true;
         if (Objects.nonNull(scheduler)) {
             scheduler.shutdownNow();
         }
 
-        flush();
-        if (Objects.nonNull(dataSource)) {
-            dataSource.close();
+        flushAll();
+        srStreamLoadClient.close();
+    }
+
+    // ========================= Checkpoint =========================
+    @Override
+    public void snapshotState(FunctionSnapshotContext context) throws Exception {
+        log.info("Snapshotting state..., checkpointId={}", context.getCheckpointId());
+
+        // 1. 设置当前 checkpoint ID（用于 label 生成）
+        this.currentCheckpointId = new AtomicLong(context.getCheckpointId());
+
+        // 2. 先 flush 所有数据，确保所有数据已提交（幂等）
+        flushAll();
+
+        // 3. 将当前 buffer 状态保存到 Flink State（用于故障恢复）
+        checkpointedState.clear();
+        for (Map.Entry<String, List<TargetDataRow>> entry : buffer.entrySet()) {
+            checkpointedState.add(new BufferItem(entry.getKey(), new ArrayList<>(entry.getValue())));
+        }
+    }
+
+    @Override
+    public void initializeState(FunctionInitializationContext context) throws Exception {
+        // 初始化状态
+        ListStateDescriptor<BufferItem> descriptor = new ListStateDescriptor<>("buffer-state", TypeInformation.of(new TypeHint<>() {}));
+        checkpointedState = context.getOperatorStateStore().getListState(descriptor);
+
+        // 恢复状态（故障恢复时）
+        buffer = new ConcurrentHashMap<>();
+        if (context.isRestored()) {
+            for (BufferItem item : checkpointedState.get()) {
+                buffer.put(item.tableName, item.rows);
+            }
+        }
+    }
+
+    /**
+     * 状态存储单元（必须实现序列化）
+     */
+    public static class BufferItem implements Serializable {
+        private static final long serialVersionUID = 1L;
+        public String tableName;
+        public List<TargetDataRow> rows;
+
+        public BufferItem() {
+        }
+
+        public BufferItem(String tableName, List<TargetDataRow> rows) {
+            this.tableName = tableName;
+            this.rows = rows;
         }
     }
 }
