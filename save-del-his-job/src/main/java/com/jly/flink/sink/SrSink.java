@@ -146,7 +146,11 @@ public class SrSink extends RichSinkFunction<TargetDataRow> implements Checkpoin
         log.info("Snapshotting state..., checkpointId={}", context.getCheckpointId());
 
         // 1. 设置当前 checkpoint ID（用于 label 生成）
-        this.currentCheckpointId = new AtomicLong(context.getCheckpointId());
+        long newCheckpointId = context.getCheckpointId();
+        long currentId = currentCheckpointId.get();
+        if (newCheckpointId > currentId) {
+            this.currentCheckpointId.set(newCheckpointId);
+        }
 
         // 2. 先 flush 所有数据，确保所有数据已提交（幂等）
         flushAll();
