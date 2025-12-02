@@ -48,6 +48,9 @@ public class SrStreamLoadClient {
                 new BasicHeader("Authorization", "Basic " + auth),
                 new BasicHeader("Expect", "100-continue"),
                 new BasicHeader("format", "JSON"),
+                // 5GB
+                new BasicHeader("load_mem_limit", "5368709120"),
+                new BasicHeader("timeout", "1200"),
                 new BasicHeader("label", label),
                 new BasicHeader("strip_outer_array", "true"),
                 new BasicHeader("ignore_json_size", "true"),

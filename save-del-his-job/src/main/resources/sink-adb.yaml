@@ -4,5 +4,5 @@ port: 3306
 username: "flink_insert"
 password: "PCQGu1WI%iaX-vbAd3m8jl"
 dbName: "del_history"
-batchSize: 100
+batchSize: 20
 flushIntervalMs: 5000
