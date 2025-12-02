@@ -74,7 +74,7 @@ public class SrSink extends RichSinkFunction<TargetDataRow> implements Checkpoin
             try {
                 flushAll();
             } catch (Exception e) {
-                log.error("Flushing data to SR failed", e);
+                log.error("Flush to SR failed", e);
             }
         }, sinkConfig.getFlushIntervalMs(), sinkConfig.getFlushIntervalMs(), TimeUnit.MILLISECONDS);
     }
@@ -119,19 +119,19 @@ public class SrSink extends RichSinkFunction<TargetDataRow> implements Checkpoin
             try {
                 resp = srStreamLoadClient.streamLoad(dbTbName, label, pt);
             } catch (Exception e) {
-                log.error("Flushing to SR table {} failed, rows={}, label={}", dbTbName , pt.size(), label);
+                log.error("Flush to SR failed: table={}, size={}, label={}, message={}", dbTbName , pt.size(), label, e.getMessage());
                 throw e;
             }
 
             if(resp.contains(LABEL_EXISTS)) {
-                log.warn("Flushing to SR failed: Label already exists, table={}, rows={}, label={}", dbTbName, pt.size(), label);
+                log.warn("Flush to SR failed: Label already exists, table={}, size={}, label={}", dbTbName, pt.size(), label);
                 return;
             }
 
             if(!resp.contains(SUCCESS_STATUS)) {
-                throw new RuntimeException(String.format("Flushing to SR table %s failed, rows=%d, label=%s, resp: %s", dbTbName, pt.size(), label, resp));
+                throw new RuntimeException(String.format("Flush to SR table %s failed, size=%d, label=%s, resp: %s", dbTbName, pt.size(), label, resp));
             }
-            log.info("Flushing to SR table {} success, rows={}, label={}", dbTbName, pt.size(), label);
+            log.info("Flush to SR success: table={}, size={}, label={}", dbTbName, pt.size(), label);
         }
     }
 
