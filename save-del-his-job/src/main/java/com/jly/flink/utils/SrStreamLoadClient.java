@@ -48,6 +48,9 @@ public class SrStreamLoadClient {
                 new BasicHeader("Authorization", "Basic " + auth),
                 new BasicHeader("Expect", "100-continue"),
                 new BasicHeader("format", "JSON"),
+                // 5GB
+                new BasicHeader("load_mem_limit", "5368709120"),
+                new BasicHeader("timeout", "1200"),
                 new BasicHeader("label", label),
                 new BasicHeader("strip_outer_array", "true"),
                 new BasicHeader("ignore_json_size", "true"),
@@ -83,8 +86,9 @@ public class SrStreamLoadClient {
     private HttpPut buildRequest(String url, Header[] headers, String body) {
         HttpPut putReq = new HttpPut(url);
         putReq.setConfig(RequestConfig.custom()
-                .setConnectionRequestTimeout(30, TimeUnit.SECONDS)
-                .setResponseTimeout(180, TimeUnit.SECONDS)
+                .setConnectTimeout(60, TimeUnit.SECONDS)
+                .setConnectionRequestTimeout(60, TimeUnit.SECONDS)
+                .setResponseTimeout(300, TimeUnit.SECONDS)
                 .setMaxRedirects(5)
                 .build());
 

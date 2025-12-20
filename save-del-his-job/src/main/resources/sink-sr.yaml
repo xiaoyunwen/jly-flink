@@ -4,5 +4,5 @@ port: 8030 # 8030【http端口】，9030【查询端口】
 username: "flink_insert"
 password: "5U@UzTbmff0sW$m5"
 dbName: "del_history"
-batchSize: 100
+batchSize: 20
 flushIntervalMs: 5000

@@ -121,11 +121,12 @@ public class AdbSink extends RichSinkFunction<TargetDataRow> {
                         }
                         stmt.executeBatch();
                     }
+                    log.info("Flush to ADB success: table={}, size={}", table, records.size());
                 }
                 conn.commit();
                 buffer.clear();
             } catch (Exception e) {
-                log.error("Flush failed: {}", e.getMessage(), e);
+                log.error("Flush to ADB failed: {}", e.getMessage(), e);
             }
         }
     }
